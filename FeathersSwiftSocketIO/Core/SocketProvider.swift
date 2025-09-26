@@ -8,8 +8,6 @@
 
 import SocketIO
 import Foundation
-import enum Result.Result
-import enum Result.NoError
 import Feathers
 import ReactiveSwift
 
@@ -156,7 +154,7 @@ public final class SocketProvider: Provider {
     
     // MARK: - RealTimeProvider
     
-    public func on(event: String) -> Signal<[String: Any], NoError> {
+    public func on(event: String) -> Signal<[String: Any], Never> {
         return Signal { [weak client = client] observer, lifetime in
             guard let vClient = client else {
                 observer.sendInterrupted()
@@ -173,7 +171,7 @@ public final class SocketProvider: Provider {
         }
     }
     
-    public func once(event: String) -> Signal<[String: Any], NoError> {
+    public func once(event: String) -> Signal<[String: Any], Never> {
         return Signal { [weak client = client] observer, lifetime in
             guard let vClient = client else {
                 observer.sendInterrupted()
