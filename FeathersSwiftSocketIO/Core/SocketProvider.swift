@@ -65,8 +65,65 @@ public final class SocketProvider: Provider {
     }
     
     public func request(endpoint: Endpoint) -> SignalProducer<Response, AnyFeathersError> {
-        let emitPath = endpoint.method.socketRequestPath
-        return emit(to: emitPath, with: [endpoint.path] + endpoint.method.socketData)
+        // Working format: emit("find", "widgets", {}) -> gets ack with widget data
+        // NOT: emit("widgets", "find", {}) or emit("widgets::find", {})
+        let method = endpoint.method.socketRequestPath  // "find", "create", "update", etc.
+        let serviceName = endpoint.path                 // "widgets", "authentication", etc.
+        let params = endpoint.method.socketData.first ?? [:]
+        
+        return SignalProducer { observer, lifetime in
+            // Use the correct format: emit(method, serviceName, params)
+            let ackCallback = self.client.emitWithAck(method, serviceName, params as! SocketData)
+            
+            ackCallback.timingOut(after: 10) { response in
+                if response.isEmpty {
+                    observer.send(error: AnyFeathersError(FeathersNetworkError.unknown))
+                } else if let errorData = response.first as? [String: Any],
+                          let errorName = errorData["name"] as? String,
+                          errorName == "NotFound" {
+                    observer.send(error: AnyFeathersError(FeathersNetworkError.notFound))
+                } else {
+                    // Success response - FeathersJS returns [null, data] format
+                    // The actual data is in response[1], response[0] is null for success
+                    if response.count > 1 {
+                        let responseData = response[1]
+                        // Handle different response data types safely
+                        if let dictData = responseData as? [String: Any] {
+                            let jsonResponse = Response(pagination: nil, data: .object(dictData))
+                            observer.send(value: jsonResponse)
+                            observer.sendCompleted()
+                        } else if let arrayData = responseData as? [[String: Any]] {
+                            let jsonResponse = Response(pagination: nil, data: .list(arrayData))
+                            observer.send(value: jsonResponse)
+                            observer.sendCompleted()
+                        } else {
+                            // Fallback for other types
+                            let jsonResponse = Response(pagination: nil, data: .object(["result": responseData]))
+                            observer.send(value: jsonResponse)
+                            observer.sendCompleted()
+                        }
+                    } else if let responseData = response.first {
+                        // Handle single response data
+                        if let dictData = responseData as? [String: Any] {
+                            let jsonResponse = Response(pagination: nil, data: .object(dictData))
+                            observer.send(value: jsonResponse)
+                            observer.sendCompleted()
+                        } else if let arrayData = responseData as? [[String: Any]] {
+                            let jsonResponse = Response(pagination: nil, data: .list(arrayData))
+                            observer.send(value: jsonResponse)
+                            observer.sendCompleted()
+                        } else {
+                            // Fallback for other types
+                            let jsonResponse = Response(pagination: nil, data: .object(["result": responseData]))
+                            observer.send(value: jsonResponse)
+                            observer.sendCompleted()
+                        }
+                    } else {
+                        observer.send(error: AnyFeathersError(FeathersNetworkError.unknown))
+                    }
+                }
+            }
+        }
     }
     
     public func authenticate(_ path: String, credentials: [String : Any]) -> SignalProducer<Response, AnyFeathersError> {
