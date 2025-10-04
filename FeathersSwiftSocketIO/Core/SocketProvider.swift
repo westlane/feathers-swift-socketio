@@ -65,15 +65,24 @@ public final class SocketProvider: Provider {
     }
     
     public func request(endpoint: Endpoint) -> SignalProducer<Response, AnyFeathersError> {
-        // Working format: emit("find", "widgets", {}) -> gets ack with widget data
-        // NOT: emit("widgets", "find", {}) or emit("widgets::find", {})
+        // FeathersJS Socket.IO format: emit(method, serviceName, params, callback)
+        // Example: socket.emit('find', 'widgets', {}, callback)
         let method = endpoint.method.socketRequestPath  // "find", "create", "update", etc.
         let serviceName = endpoint.path                 // "widgets", "authentication", etc.
         let params = endpoint.method.socketData.first ?? [:]
         
         return SignalProducer { observer, lifetime in
-            // Use the correct format: emit(method, serviceName, params)
-            let ackCallback = self.client.emitWithAck(method, serviceName, params as! SocketData)
+            // Check if socket is actually connected
+            guard self.client.status == .connected else {
+                observer.send(error: AnyFeathersError(FeathersNetworkError.unknown))
+                return
+            }
+            
+            // Ensure params is valid SocketData (Dictionary)
+            let socketParams: [String: Any] = params as? [String: Any] ?? [:]
+            
+            // Emit with FeathersJS format: method, serviceName, params
+            let ackCallback = self.client.emitWithAck(method, serviceName, socketParams)
             
             ackCallback.timingOut(after: 10) { response in
                 if response.isEmpty {
@@ -154,6 +163,7 @@ public final class SocketProvider: Provider {
                             observer.send(error: error)
                         } else if let response = result.value {
                             observer.send(value: response)
+                            observer.sendCompleted()  // Complete the signal
                         } else {
                             observer.send(error: AnyFeathersError(FeathersNetworkError.unknown))
                         }
@@ -166,6 +176,7 @@ public final class SocketProvider: Provider {
                         observer.send(error: error)
                     } else if let response = result.value {
                         observer.send(value: response)
+                        observer.sendCompleted()  // Complete the signal
                     } else {
                         observer.send(error: AnyFeathersError(FeathersNetworkError.unknown))
                     }
