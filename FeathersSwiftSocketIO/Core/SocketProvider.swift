@@ -98,9 +98,18 @@ public final class SocketProvider: Provider {
                         let responseData = response[1]
                         // Handle different response data types safely
                         if let dictData = responseData as? [String: Any] {
-                            let jsonResponse = Response(pagination: nil, data: .object(dictData))
-                            observer.send(value: jsonResponse)
-                            observer.sendCompleted()
+                            // Check if this is a paginated response (has total, limit, skip, data)
+                            if let pagination = self.parsePagination(data: dictData),
+                               let dataArray = dictData["data"] as? [Any] {
+                                let jsonResponse = Response(pagination: pagination, data: .list(dataArray))
+                                observer.send(value: jsonResponse)
+                                observer.sendCompleted()
+                            } else {
+                                // Not paginated, return as object
+                                let jsonResponse = Response(pagination: nil, data: .object(dictData))
+                                observer.send(value: jsonResponse)
+                                observer.sendCompleted()
+                            }
                         } else if let arrayData = responseData as? [[String: Any]] {
                             let jsonResponse = Response(pagination: nil, data: .list(arrayData))
                             observer.send(value: jsonResponse)
