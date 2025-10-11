@@ -59,17 +59,20 @@ public final class SocketProvider: Provider {
                 })
                 .start()
         }
+        
         client.connect(timeoutAfter: timeout) {
             print("feathers socket failed to connect")
         }
     }
     
     public func request(endpoint: Endpoint) -> SignalProducer<Response, AnyFeathersError> {
-        // FeathersJS Socket.IO format: emit(method, serviceName, params, callback)
-        // Example: socket.emit('find', 'widgets', {}, callback)
-        let method = endpoint.method.socketRequestPath  // "find", "create", "update", etc.
-        let serviceName = endpoint.path                 // "widgets", "authentication", etc.
-        let params = endpoint.method.socketData.first ?? [:]
+        // FeathersJS Socket.IO format varies by method:
+        // find: emit('find', 'widgets', params)
+        // create: emit('create', 'widgets', data, params)
+        // patch: emit('patch', 'widgets', id, data, params)
+        let method = endpoint.method.socketRequestPath
+        let serviceName = endpoint.path
+        var socketParams = endpoint.method.socketData  // Array of parameters
         
         return SignalProducer { observer, lifetime in
             // Check if socket is actually connected
@@ -78,19 +81,37 @@ public final class SocketProvider: Provider {
                 return
             }
             
-            // Ensure params is valid SocketData (Dictionary)
-            let socketParams: [String: Any] = params as? [String: Any] ?? [:]
+            // Note: Authentication is handled at the socket level via the auto-auth on connect.
+            // No need to pass auth tokens with each request in Feathers v4 style.
             
-            // Emit with FeathersJS format: method, serviceName, params
-            let ackCallback = self.client.emitWithAck(method, serviceName, socketParams)
+            // Emit with correct number of parameters based on socketParams count
+            let ackCallback: OnAckCallback
+            switch socketParams.count {
+            case 1:
+                ackCallback = self.client.emitWithAck(method, serviceName, socketParams[0] ?? [:])
+            case 2:
+                ackCallback = self.client.emitWithAck(method, serviceName, socketParams[0] ?? [:], socketParams[1] ?? [:])
+            case 3:
+                ackCallback = self.client.emitWithAck(method, serviceName, socketParams[0] ?? [:], socketParams[1] ?? [:], socketParams[2] ?? [:])
+            default:
+                observer.send(error: AnyFeathersError(FeathersNetworkError.unknown))
+                return
+            }
+
             
             ackCallback.timingOut(after: 10) { response in
                 if response.isEmpty {
                     observer.send(error: AnyFeathersError(FeathersNetworkError.unknown))
                 } else if let errorData = response.first as? [String: Any],
                           let errorName = errorData["name"] as? String,
-                          errorName == "NotFound" {
-                    observer.send(error: AnyFeathersError(FeathersNetworkError.notFound))
+                          let errorCode = errorData["code"] as? Int {
+                    // FeathersJS errors have name, message, and code fields
+                    // Map the error code to the appropriate FeathersNetworkError
+                    if let feathersError = FeathersNetworkError(statusCode: errorCode) {
+                        observer.send(error: AnyFeathersError(feathersError))
+                    } else {
+                        observer.send(error: AnyFeathersError(FeathersNetworkError.unknown))
+                    }
                 } else {
                     // Success response - FeathersJS returns [null, data] format
                     // The actual data is in response[1], response[0] is null for success
@@ -123,9 +144,18 @@ public final class SocketProvider: Provider {
                     } else if let responseData = response.first {
                         // Handle single response data
                         if let dictData = responseData as? [String: Any] {
-                            let jsonResponse = Response(pagination: nil, data: .object(dictData))
-                            observer.send(value: jsonResponse)
-                            observer.sendCompleted()
+                            // Check if this is a paginated response (has total, limit, skip, data)
+                            if let pagination = self.parsePagination(data: dictData), 
+                               let dataArray = dictData["data"] as? [Any] {
+                                let jsonResponse = Response(pagination: pagination, data: .list(dataArray))
+                                observer.send(value: jsonResponse)
+                                observer.sendCompleted()
+                            } else {
+                                // Not paginated, return as object
+                                let jsonResponse = Response(pagination: nil, data: .object(dictData))
+                                observer.send(value: jsonResponse)
+                                observer.sendCompleted()
+                            }
                         } else if let arrayData = responseData as? [[String: Any]] {
                             let jsonResponse = Response(pagination: nil, data: .list(arrayData))
                             observer.send(value: jsonResponse)
@@ -145,10 +175,18 @@ public final class SocketProvider: Provider {
     }
     
     public func authenticate(_ path: String, credentials: [String : Any]) -> SignalProducer<Response, AnyFeathersError> {
+        // Feathers v5: Use service-based authentication instead of deprecated "authenticate" event
+        // Modern approach: Call the authentication service using standard service methods:
+        //   client.service("authentication").request(.create(data: credentials))
+        //
+        // Keeping this method for backward compatibility but it should not be used
         return emit(to: "authenticate", with: credentials)
     }
     
     public func logout(path: String) -> SignalProducer<Response, AnyFeathersError> {
+        // Feathers v5: Logout should also use service-based approach
+        // Modern: client.service("authentication").request(.remove(id: nil))
+        // But keeping legacy event for backward compatibility
         return emit(to: "logout", with: [])
     }
     
@@ -238,7 +276,9 @@ public final class SocketProvider: Provider {
                 return
             }
             vClient.on(event, callback: { data, _ in
-                guard let object = data.first as? [String: Any] else { return }
+                guard let object = data.first as? [String: Any] else { 
+                    return 
+                }
                 observer.send(value: object)
             })
             let disposable = AnyDisposable {
@@ -287,7 +327,7 @@ fileprivate extension Service.Method {
         case .create: return "create"
         case .update: return "update"
         case .patch: return "patch"
-        case .remove: return "removed"
+        case .remove: return "remove"  // Method is 'remove', event is 'removed'
         }
     }
     
