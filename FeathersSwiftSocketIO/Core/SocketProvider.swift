@@ -22,6 +22,9 @@ public final class SocketProvider: Provider {
     /// SocketIO client.
     private let client: SocketIOClient
     
+    /// Socket manager - keep strong reference to prevent deallocation during async ops
+    private let manager: SocketManager
+    
     /// Socket timeout for `connect` and all emits.
     private let timeout: Double
     
@@ -35,6 +38,7 @@ public final class SocketProvider: Provider {
     public init(manager: SocketManager, timeout: Double = 5) {
         self.baseURL = manager.socketURL
         self.timeout = timeout
+        self.manager = manager
         client = manager.defaultSocket
     }
     
@@ -75,8 +79,12 @@ public final class SocketProvider: Provider {
         var socketParams = endpoint.method.socketData  // Array of parameters
         
         return SignalProducer { observer, lifetime in
+            // Strongly capture client and manager to prevent deallocation during async operations
+            let client = self.client
+            let manager = self.manager
+            
             // Check if socket is actually connected
-            guard self.client.status == .connected else {
+            guard client.status == .connected else {
                 observer.send(error: AnyFeathersError(FeathersNetworkError.unknown))
                 return
             }
@@ -88,18 +96,21 @@ public final class SocketProvider: Provider {
             let ackCallback: OnAckCallback
             switch socketParams.count {
             case 1:
-                ackCallback = self.client.emitWithAck(method, serviceName, socketParams[0] ?? [:])
+                ackCallback = client.emitWithAck(method, serviceName, socketParams[0] ?? [:])
             case 2:
-                ackCallback = self.client.emitWithAck(method, serviceName, socketParams[0] ?? [:], socketParams[1] ?? [:])
+                ackCallback = client.emitWithAck(method, serviceName, socketParams[0] ?? [:], socketParams[1] ?? [:])
             case 3:
-                ackCallback = self.client.emitWithAck(method, serviceName, socketParams[0] ?? [:], socketParams[1] ?? [:], socketParams[2] ?? [:])
+                ackCallback = client.emitWithAck(method, serviceName, socketParams[0] ?? [:], socketParams[1] ?? [:], socketParams[2] ?? [:])
             default:
                 observer.send(error: AnyFeathersError(FeathersNetworkError.unknown))
                 return
             }
 
             
-            ackCallback.timingOut(after: 10) { response in
+            ackCallback.timingOut(after: 10) { [manager, client] response in
+                // Capture manager and client strongly to keep SocketAckManager alive
+                _ = manager
+                _ = client
                 if response.isEmpty {
                     observer.send(error: AnyFeathersError(FeathersNetworkError.unknown))
                 } else if let errorData = response.first as? [String: Any],
