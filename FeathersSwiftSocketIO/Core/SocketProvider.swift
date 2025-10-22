@@ -28,6 +28,12 @@ public final class SocketProvider: Provider {
     /// Socket timeout for `connect` and all emits.
     private let timeout: Double
     
+    /// Request serialization to prevent duplicate ack IDs
+    /// The socket.io library's ack ID generator is not thread-safe for concurrent requests
+    private let requestLock = NSLock()
+    private var pendingRequestCount = 0
+    private let requestSemaphore = DispatchSemaphore(value: 1) // Only 1 request at a time
+    
     /// Socket provider initializer.
     ///
     /// - Parameters:
@@ -44,6 +50,8 @@ public final class SocketProvider: Provider {
     
     public func setup(app: Feathers) {
         // Attempt to authenticate using a previously stored token once the client connects.
+        // This is now safe thanks to request serialization preventing duplicate ack IDs.
+        // If manual authentication clears the token, this won't run.
         client.once("connect") { [weak app = app, weak self] data, ack in
             guard let vSelf = self else { return }
             guard let vApp = app else { return }
@@ -76,15 +84,38 @@ public final class SocketProvider: Provider {
         // patch: emit('patch', 'widgets', id, data, params)
         let method = endpoint.method.socketRequestPath
         let serviceName = endpoint.path
-        var socketParams = endpoint.method.socketData  // Array of parameters
+        let socketParams = endpoint.method.socketData  // Array of parameters
         
         return SignalProducer { observer, lifetime in
+            // Serialize socket requests to ensure reliable operation
+            // The socket.io library expects sequential request handling for proper ack management
+            self.requestSemaphore.wait()
+            
+            // Track pending request
+            self.requestLock.lock()
+            self.pendingRequestCount += 1
+            let requestId = self.pendingRequestCount
+            self.requestLock.unlock()
+            
             // Strongly capture client and manager to prevent deallocation during async operations
             let client = self.client
             let manager = self.manager
             
+            // Ensure we always release the semaphore
+            let releaseOnce: () -> Void = {
+                self.requestSemaphore.signal()
+            }
+            var hasReleased = false
+            let releaseSemaphore = {
+                if !hasReleased {
+                    hasReleased = true
+                    releaseOnce()
+                }
+            }
+            
             // Check if socket is actually connected
             guard client.status == .connected else {
+                releaseSemaphore()
                 observer.send(error: AnyFeathersError(FeathersNetworkError.unknown))
                 return
             }
@@ -102,19 +133,23 @@ public final class SocketProvider: Provider {
             case 3:
                 ackCallback = client.emitWithAck(method, serviceName, socketParams[0] ?? [:], socketParams[1] ?? [:], socketParams[2] ?? [:])
             default:
+                releaseSemaphore()
                 observer.send(error: AnyFeathersError(FeathersNetworkError.unknown))
                 return
             }
 
             
             ackCallback.timingOut(after: 10) { [manager, client] response in
+                // Release semaphore when response arrives (or times out)
+                releaseSemaphore()
+                
                 // Capture manager and client strongly to keep SocketAckManager alive
                 _ = manager
                 _ = client
                 if response.isEmpty {
                     observer.send(error: AnyFeathersError(FeathersNetworkError.unknown))
                 } else if let errorData = response.first as? [String: Any],
-                          let errorName = errorData["name"] as? String,
+                          let _ = errorData["name"] as? String,
                           let errorCode = errorData["code"] as? Int {
                     // FeathersJS errors have name, message, and code fields
                     // Map the error code to the appropriate FeathersNetworkError
@@ -208,15 +243,18 @@ public final class SocketProvider: Provider {
     ///   - data: Data to emit.
     ///   - completion: Completion callback.
     private func emit(to path: String, with data: SocketData) -> SignalProducer<Response, AnyFeathersError> {
-        return SignalProducer { [weak self] observer, disposable in
-            guard let vSelf = self else {
-                observer.sendInterrupted()
-                return
-            }
-            if vSelf.client.status == .connecting {
-                vSelf.client.once("connect") { _,_  in
-                    vSelf.client.emitWithAck(path, data).timingOut(after: vSelf.timeout) { data in
-                        let result = vSelf.handleResponseData(data: data)
+        return SignalProducer { observer, disposable in
+            // Strongly capture manager and client to prevent deallocation during async operations
+            let manager = self.manager
+            let client = self.client
+            
+            if client.status == .connecting {
+                client.once("connect") { _,_  in
+                    client.emitWithAck(path, data).timingOut(after: self.timeout) { [manager, client] data in
+                        // Keep manager and client alive throughout callback lifecycle
+                        _ = manager
+                        _ = client
+                        let result = self.handleResponseData(data: data)
                         if let error = result.error {
                             observer.send(error: error)
                         } else if let response = result.value {
@@ -228,8 +266,11 @@ public final class SocketProvider: Provider {
                     }
                 }
             } else {
-                vSelf.client.emitWithAck(path, data).timingOut(after: vSelf.timeout) { data in
-                    let result = vSelf.handleResponseData(data: data)
+                client.emitWithAck(path, data).timingOut(after: self.timeout) { [manager, client] data in
+                    // Keep manager and client alive throughout callback lifecycle
+                    _ = manager
+                    _ = client
+                    let result = self.handleResponseData(data: data)
                     if let error = result.error {
                         observer.send(error: error)
                     } else if let response = result.value {
