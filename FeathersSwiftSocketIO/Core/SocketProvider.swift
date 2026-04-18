@@ -30,8 +30,6 @@ public final class SocketProvider: Provider {
     
     /// Request serialization to prevent duplicate ack IDs
     /// The socket.io library's ack ID generator is not thread-safe for concurrent requests
-    private let requestLock = NSLock()
-    private var pendingRequestCount = 0
     private let requestSemaphore = DispatchSemaphore(value: 1) // Only 1 request at a time
     
     /// Socket provider initializer.
@@ -90,12 +88,6 @@ public final class SocketProvider: Provider {
             // Serialize socket requests to ensure reliable operation
             // The socket.io library expects sequential request handling for proper ack management
             self.requestSemaphore.wait()
-            
-            // Track pending request
-            self.requestLock.lock()
-            self.pendingRequestCount += 1
-            let requestId = self.pendingRequestCount
-            self.requestLock.unlock()
             
             // Strongly capture client and manager to prevent deallocation during async operations
             let client = self.client
