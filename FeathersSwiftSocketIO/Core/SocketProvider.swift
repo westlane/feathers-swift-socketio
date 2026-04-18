@@ -78,10 +78,10 @@ public final class SocketProvider: Provider {
     }
     
     public func request(endpoint: Endpoint) -> SignalProducer<Response, AnyFeathersError> {
-        // FeathersJS Socket.IO format varies by method:
-        // find: emit('find', 'widgets', params)
-        // create: emit('create', 'widgets', data, params)
-        // patch: emit('patch', 'widgets', id, data, params)
+        // FeathersJS Socket.IO format varies by method (second argument is the service path string):
+        // find: emit('find', servicePath, params)
+        // create: emit('create', servicePath, data, params)
+        // patch: emit('patch', servicePath, id, data, params)
         let method = endpoint.method.socketRequestPath
         let serviceName = endpoint.path
         let socketParams = endpoint.method.socketData  // Array of parameters
