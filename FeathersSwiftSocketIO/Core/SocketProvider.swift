@@ -141,15 +141,9 @@ public final class SocketProvider: Provider {
                 if response.isEmpty {
                     observer.send(error: AnyFeathersError(FeathersNetworkError.unknown))
                 } else if let errorData = response.first as? [String: Any],
-                          let _ = errorData["name"] as? String,
                           let errorCode = errorData["code"] as? Int {
-                    // FeathersJS errors have name, message, and code fields
-                    // Map the error code to the appropriate FeathersNetworkError
-                    if let feathersError = FeathersNetworkError(statusCode: errorCode) {
-                        observer.send(error: AnyFeathersError(feathersError))
-                    } else {
-                        observer.send(error: AnyFeathersError(FeathersNetworkError.unknown))
-                    }
+                    let detail = FeathersHTTPErrorDetail.make(statusCode: errorCode, json: errorData)
+                    observer.send(error: AnyFeathersError(FeathersNetworkError.underlying(detail)))
                 } else {
                     // Success response - FeathersJS returns [null, data] format
                     // The actual data is in response[1], response[0] is null for success
@@ -284,8 +278,9 @@ public final class SocketProvider: Provider {
     private func handleResponseData(data: [Any]) -> Result<Response, AnyFeathersError> {
         if let noAck = data.first as? String, noAck == "NO ACK" {
             return .failure(AnyFeathersError(FeathersNetworkError.notFound))
-        } else if let errorData = data.first as? [String: Any], let code = errorData["code"] as? Int, let error = FeathersNetworkError(statusCode: code) {
-            return .failure(AnyFeathersError(error))
+        } else if let errorData = data.first as? [String: Any], let code = errorData["code"] as? Int {
+            let detail = FeathersHTTPErrorDetail.make(statusCode: code, json: errorData)
+            return .failure(AnyFeathersError(FeathersNetworkError.underlying(detail)))
         } else if let jsonObject = data.last as? [String: Any] {
             if let pagination = parsePagination(data: jsonObject), let data = jsonObject["data"] as? [Any] {
                 return .success(Response(pagination: pagination, data: .list(data)))
