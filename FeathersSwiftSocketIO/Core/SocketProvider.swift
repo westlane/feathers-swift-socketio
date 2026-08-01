@@ -31,6 +31,22 @@ public final class SocketProvider: Provider {
     /// Request serialization to prevent duplicate ack IDs
     /// The socket.io library's ack ID generator is not thread-safe for concurrent requests
     private let requestSemaphore = DispatchSemaphore(value: 1) // Only 1 request at a time
+
+    private static let handleQueueKey = DispatchSpecificKey<Void>()
+
+    private static func markHandleQueue(_ queue: DispatchQueue) {
+        queue.setSpecific(key: handleQueueKey, value: ())
+    }
+
+    private func removeHandler(id: UUID) {
+        if DispatchQueue.getSpecific(key: Self.handleQueueKey) != nil {
+            client.off(id: id)
+            return
+        }
+        manager.handleQueue.async { [client] in
+            client.off(id: id)
+        }
+    }
     
     /// Socket provider initializer.
     ///
@@ -44,8 +60,10 @@ public final class SocketProvider: Provider {
         self.timeout = timeout
         self.manager = manager
         client = manager.defaultSocket
+        Self.markHandleQueue(manager.handleQueue)
     }
     
+    /// Register post-connect auto-auth. Caller must invoke `socket.connect()` exactly once.
     public func setup(app: Feathers) {
         // Attempt to authenticate using a previously stored token once the client connects.
         // This is now safe thanks to request serialization preventing duplicate ack IDs.
@@ -68,10 +86,6 @@ public final class SocketProvider: Provider {
                     }
                 })
                 .start()
-        }
-        
-        client.connect(timeoutAfter: timeout) {
-            print("feathers socket failed to connect")
         }
     }
     
@@ -309,44 +323,50 @@ public final class SocketProvider: Provider {
     // MARK: - RealTimeProvider
     
     public func on(event: String) -> Signal<[String: Any], Never> {
-        return Signal { [weak client = client] observer, lifetime in
+        return Signal { [weak client = client, weak manager = manager] observer, lifetime in
             guard let vClient = client else {
                 observer.sendInterrupted()
                 return
             }
-            vClient.on(event, callback: { data, _ in
-                guard let object = data.first as? [String: Any] else { 
-                    return 
+            let handlerID = vClient.on(event, callback: { data, _ in
+                guard let object = data.first as? [String: Any] else {
+                    return
                 }
                 observer.send(value: object)
             })
-            let disposable = AnyDisposable {
-                vClient.off(event)
+            let disposable = AnyDisposable { [weak self] in
+                self?.removeHandler(id: handlerID)
             }
             lifetime += disposable
         }
     }
     
     public func once(event: String) -> Signal<[String: Any], Never> {
-        return Signal { [weak client = client] observer, lifetime in
+        return Signal { [weak client = client, weak manager = manager] observer, lifetime in
             guard let vClient = client else {
                 observer.sendInterrupted()
                 return
             }
-            vClient.once(event, callback: { data, _ in
+            let handlerID = vClient.once(event, callback: { data, _ in
                 guard let object = data.first as? [String: Any] else { return }
                 observer.send(value: object)
                 observer.sendCompleted()
             })
-            let disposable = AnyDisposable {
-                vClient.off(event)
+            let disposable = AnyDisposable { [weak self] in
+                self?.removeHandler(id: handlerID)
             }
             lifetime += disposable
         }
     }
     
     public func off(event: String) {
-        client.off(event)
+        if DispatchQueue.getSpecific(key: Self.handleQueueKey) != nil {
+            client.off(event)
+            return
+        }
+        manager.handleQueue.async { [client] in
+            client.off(event)
+        }
     }
     
     // MARK: - Deinit
