@@ -6,7 +6,7 @@
 //  Copyright © 2017 FeathersJS. All rights reserved.
 //
 
-import SocketIO
+@preconcurrency import SocketIO
 import Foundation
 import Feathers
 import ReactiveSwift
@@ -323,7 +323,7 @@ public final class SocketProvider: Provider {
     // MARK: - RealTimeProvider
     
     public func on(event: String) -> Signal<[String: Any], Never> {
-        return Signal { [weak client = client, weak manager = manager] observer, lifetime in
+        return Signal { [weak client = client] observer, lifetime in
             guard let vClient = client else {
                 observer.sendInterrupted()
                 return
@@ -342,7 +342,7 @@ public final class SocketProvider: Provider {
     }
     
     public func once(event: String) -> Signal<[String: Any], Never> {
-        return Signal { [weak client = client, weak manager = manager] observer, lifetime in
+        return Signal { [weak client = client] observer, lifetime in
             guard let vClient = client else {
                 observer.sendInterrupted()
                 return
